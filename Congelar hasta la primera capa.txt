@@ -1,0 +1,100 @@
+import tensorflow as tf
+from tensorflow.keras.layers import Dense, Conv2D, MaxPooling2D, Dropout, BatchNormalization,Conv2DTranspose,Activation,concatenate,Input
+from tensorflow.keras import Sequential,Model
+import numpy as np
+from tensorflow.keras.preprocessing.image import load_img, img_to_array
+import os
+from tensorflow.keras.preprocessing.image import ImageDataGenerator
+from tensorflow.keras.callbacks import ModelCheckpoint,EarlyStopping
+import matplotlib.pyplot as plt
+def conv_block(input, filters):
+    x = Conv2D(filters, 3, padding="same")(input)
+    x = BatchNormalization()(x)
+    x = tf.keras.layers.Activation('relu')(x)
+
+    x = Conv2D(filters, 3, padding="same")(x)
+    x = BatchNormalization()(x)
+    x = tf.keras.layers.Activation('relu')(x)
+    return x
+
+def encoder_block(input,filters):
+
+    x = conv_block(input,filters)
+    p = MaxPooling2D((2,2))(x)
+    return x,p
+
+def decoder_block(input,skip,filters):
+
+    x = Conv2DTranspose(filters,2,strides=2,padding="same")(input)
+    x = concatenate([x,skip])
+    x = conv_block(x,filters)
+    return x
+def build_model():
+    input = Input(shape=(512, 512, 3))
+
+    x1, p1 = encoder_block(input, 64)
+    x2, p2 = encoder_block(p1, 128)
+    x3, p3 = encoder_block(p2, 256)
+    x4, p4 = encoder_block(p3, 512)
+
+    # Freeze the first layers' weights
+    input.trainable = False
+
+    a1 = conv_block(p4, 1024)
+
+    d1 = decoder_block(a1, x4, 512)
+    d2 = decoder_block(d1, x3, 256)
+    d3 = decoder_block(d2, x2, 128)
+    d4 = decoder_block(d3, x1, 64)
+
+    output = Conv2D(1, (1, 1), padding="same", activation="sigmoid")(d4)
+    model = Model(input, output)
+    return modeldef load_data(path,img_size):
+    images = []
+    masks = []
+    for img_files,mask_files in zip(os.listdir(path+"/image"),os.listdir(path+"/mask")):
+        img_path = os.path.join(path+"/image",img_files)
+        mask_path = os.path.join(path+"/mask",mask_files)
+
+        img = load_img(img_path,target_size=img_size)
+        mask = load_img(mask_path,target_size=img_size,color_mode="grayscale")
+
+        img = img_to_array(img)/255.0
+        mask = img_to_array(mask)/255.0
+
+        images.append(img)
+        masks.append(mask)
+    return np.array(images),np.array(masks)
+def augment_image(image, mask):
+    image = tf.image.resize(image, [512, 512], method='bilinear') # Resize to 1024x1024
+    mask = tf.image.resize(mask, [512, 512], method='nearest')  # Resize mask using nearest neighbor
+
+    image = tf.image.random_flip_left_right(image)
+    image = tf.image.random_flip_up_down(image)
+    image = tf.image.random_brightness(image, max_delta=0.1)
+    image = tf.image.random_contrast(image, lower=0.8, upper=1.2)
+    return image, mask
+x_train,y_train = load_data("/content/Data/train",img_size=(512,512))
+x_test,y_test = load_data("/content/Data/test",img_size=(512,512))
+x_train.shape,y_train.shape,x_test.shape,y_test.shape
+def tf_dataset(x,y,batch_size=8):
+    dataset = tf.data.Dataset.from_tensor_slices((x,y))
+    dataset = dataset.shuffle(buffer_size=8)
+    dataset = dataset.batch(batch_size)
+    dataset = dataset.map(augment_image, num_parallel_calls=tf.data.AUTOTUNE)
+    dataset = dataset.prefetch(tf.data.AUTOTUNE)
+    return dataset
+
+train_dataset = tf_dataset(x_train,y_train,batch_size=8)
+test_dataset = tf_dataset(x_test,y_test,batch_size=8)
+model = build_model()
+model.compile(optimizer="adam",loss="binary_crossentropy",metrics=["accuracy"])
+checkpoint = ModelCheckpoint("best_model.keras", monitor='val_loss',save_best_only=True, mode='min', verbose=1)
+
+early_stopping = EarlyStopping(monitor='val_loss', patience=15, mode='min',verbose=1, restore_best_weights=True)
+history = model.fit(train_dataset,
+                    epochs=100,
+                    batch_size=8,
+                    validation_data=test_dataset,
+                    callbacks=[checkpoint, early_stopping]
+                    )
